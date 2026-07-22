@@ -1,29 +1,29 @@
-#!/bin/bash
+#!/data/data/com.termux/files/usr/bin/bash
 # ============================================================
 #  ROBLOX AUTO REJOIN - Termux (Root)
 #  Tự động phát hiện Roblox bị văng/đóng, kill & mở lại game
 # ============================================================
 
 # ─────────────────────────────────────────
-#  CẤU HÌNH - Chỉnh sửa tại đây
+#  CẤU HÌNH MẶC ĐỊNH (có thể đổi khi chạy)
 # ─────────────────────────────────────────
-ROBLOX_PACKAGE="com.roblox.client"          # Package name chính thức của Roblox
-GAME_LINK=""                                # Link game (vd: roblox://placeId=12345)
-                                            # Để trống để script hỏi khi chạy
+ROBLOX_PACKAGE="com.roblox.client"   # Package name Roblox
+GAME_LINK=""                          # Link game / private server (nhập khi chạy)
 
-CHECK_INTERVAL=5          # Kiểm tra mỗi N giây
-RESTART_DELAY=5           # Chờ N giây sau khi kill trước khi mở lại
-WARMUP_TIME=20            # Chờ N giây sau khi mở Roblox để game load xong
-CRASH_COOLDOWN=10         # Chờ thêm N giây nếu crash liên tục
-MAX_CRASHES_IN_ROW=5      # Dừng cảnh báo nếu crash quá nhiều lần liên tiếp
-LOG_FILE="$HOME/roblox_rejoin.log"          # File log
-MAX_LOG_LINES=500         # Giới hạn dòng log (tự cắt bớt)
-ENABLE_VIBRATE=true       # Rung điện thoại khi phát hiện crash (true/false)
-ENABLE_TOAST=true         # Hiện thông báo toast (true/false)
-ENABLE_NOTIFICATION=true  # Hiện notification (true/false)
+CHECK_INTERVAL=5       # Kiểm tra mỗi N giây
+RESTART_DELAY=5        # Chờ N giây sau khi kill trước khi mở lại
+WARMUP_TIME=20         # Chờ N giây sau khi mở Roblox để game load xong
+CRASH_COOLDOWN=10      # Chờ thêm N giây nếu crash liên tục
+MAX_CRASHES_IN_ROW=5   # Ngưỡng crash liên tiếp → bật cooldown
+LOG_FILE="$HOME/roblox_rejoin.log"
+MAX_LOG_LINES=500
+
+ENABLE_VIBRATE=true
+ENABLE_TOAST=true
+ENABLE_NOTIFICATION=true
 
 # ─────────────────────────────────────────
-#  MÀU SẮC TERMINAL
+#  MÀU SẮC
 # ─────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -40,8 +40,6 @@ RESET='\033[0m'
 REJOIN_COUNT=0
 CRASH_STREAK=0
 START_TIME=$(date +%s)
-LAST_RESTART_TIME=0
-SCRIPT_PID=$$
 
 # ─────────────────────────────────────────
 #  HÀM LOG
@@ -51,22 +49,17 @@ log() {
     local msg="$2"
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    local line="[$timestamp] [$level] $msg"
+    echo "[$timestamp] [$level] $msg" >> "$LOG_FILE"
 
-    # In ra terminal với màu
     case "$level" in
-        INFO)    echo -e "${GREEN}[INFO]${RESET}  $msg" ;;
-        WARN)    echo -e "${YELLOW}[WARN]${RESET}  $msg" ;;
-        ERROR)   echo -e "${RED}[ERROR]${RESET} $msg" ;;
-        ACTION)  echo -e "${CYAN}[ACTION]${RESET} $msg" ;;
-        STAT)    echo -e "${MAGENTA}[STAT]${RESET}  $msg" ;;
-        *)       echo -e "$msg" ;;
+        INFO)   echo -e "${GREEN}[INFO]${RESET}  $msg" ;;
+        WARN)   echo -e "${YELLOW}[WARN]${RESET}  $msg" ;;
+        ERROR)  echo -e "${RED}[ERROR]${RESET} $msg" ;;
+        ACTION) echo -e "${CYAN}[ACTION]${RESET} $msg" ;;
+        STAT)   echo -e "${MAGENTA}[STAT]${RESET}  $msg" ;;
+        *)      echo -e "$msg" ;;
     esac
 
-    # Ghi vào file log
-    echo "$line" >> "$LOG_FILE"
-
-    # Cắt bớt log nếu quá dài
     local line_count
     line_count=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
     if [ "$line_count" -gt "$MAX_LOG_LINES" ]; then
@@ -78,194 +71,243 @@ log() {
 #  HÀM TIỆN ÍCH
 # ─────────────────────────────────────────
 show_toast() {
-    if [ "$ENABLE_TOAST" = true ]; then
-        am broadcast -a me.shikhir.forge.REQUEST_TOAST \
-            --es "message" "$1" 2>/dev/null || true
-        # Fallback: termux-toast nếu có
-        command -v termux-toast &>/dev/null && termux-toast "$1" 2>/dev/null || true
+    if [ "$ENABLE_TOAST" = "true" ]; then
+        command -v termux-toast >/dev/null 2>&1 && termux-toast "$1" 2>/dev/null || true
     fi
 }
 
 send_notification() {
-    if [ "$ENABLE_NOTIFICATION" = true ]; then
-        command -v termux-notification &>/dev/null && \
-            termux-notification \
-                --title "Roblox Auto Rejoin" \
-                --content "$1" \
-                --id 9001 \
-                --ongoing 2>/dev/null || true
+    if [ "$ENABLE_NOTIFICATION" = "true" ]; then
+        command -v termux-notification >/dev/null 2>&1 && \
+            termux-notification --title "Roblox Auto Rejoin" \
+                --content "$1" --id 9001 --ongoing 2>/dev/null || true
     fi
 }
 
-vibrate() {
-    if [ "$ENABLE_VIBRATE" = true ]; then
-        command -v termux-vibrate &>/dev/null && termux-vibrate -d 300 2>/dev/null || true
+vibrate_phone() {
+    if [ "$ENABLE_VIBRATE" = "true" ]; then
+        command -v termux-vibrate >/dev/null 2>&1 && termux-vibrate -d 300 2>/dev/null || true
     fi
 }
 
-# Kiểm tra xem Roblox có đang chạy không
 is_roblox_running() {
-    # Dùng pidof (root) để chính xác hơn
-    if pidof "$ROBLOX_PACKAGE" &>/dev/null 2>&1; then
-        return 0
-    fi
-    # Backup: dùng pgrep
-    if pgrep -f "$ROBLOX_PACKAGE" &>/dev/null 2>&1; then
-        return 0
-    fi
-    # Backup 2: dùng ps -A
-    if ps -A 2>/dev/null | grep -q "$ROBLOX_PACKAGE"; then
-        return 0
-    fi
+    pidof "$ROBLOX_PACKAGE" >/dev/null 2>&1 && return 0
+    pgrep -f "$ROBLOX_PACKAGE" >/dev/null 2>&1 && return 0
+    ps -A 2>/dev/null | grep -q "$ROBLOX_PACKAGE" && return 0
     return 1
 }
 
-# Lấy PID của Roblox
 get_roblox_pid() {
     pidof "$ROBLOX_PACKAGE" 2>/dev/null \
         || pgrep -f "$ROBLOX_PACKAGE" 2>/dev/null \
         || ps -A 2>/dev/null | grep "$ROBLOX_PACKAGE" | awk '{print $1}' | head -1
 }
 
-# Kill hoàn toàn Roblox (root)
 kill_roblox() {
-    log "ACTION" "Đang kill Roblox..."
+    log "ACTION" "Đang kill Roblox ($ROBLOX_PACKAGE)..."
     local pid
     pid=$(get_roblox_pid)
-
-    # Kill bằng am force-stop trước
     am force-stop "$ROBLOX_PACKAGE" 2>/dev/null || true
     sleep 1
-
-    # Kill bằng PID nếu còn sót
     if [ -n "$pid" ]; then
         kill -9 $pid 2>/dev/null || true
     fi
-
-    # Root: dùng killall
     killall -9 "$ROBLOX_PACKAGE" 2>/dev/null || true
-
-    # Xóa cache RAM nếu cần (tránh Roblox bị đóng băng)
-    # echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-
     sleep "$RESTART_DELAY"
-    log "INFO" "Đã kill Roblox xong."
+    log "INFO" "Kill xong."
 }
 
-# Mở lại Roblox với link game
 open_roblox() {
-    log "ACTION" "Đang mở lại Roblox... (link: $GAME_LINK)"
-
-    # Monkey-patch: wake screen trước khi mở app
-    input keyevent 26 2>/dev/null || true   # POWER key (wake)
+    log "ACTION" "Mở lại Roblox: $GAME_LINK"
+    input keyevent 26 2>/dev/null || true
     sleep 0.5
-    input keyevent 82 2>/dev/null || true   # MENU key (unlock nếu không có password)
+    input keyevent 82 2>/dev/null || true
     sleep 0.5
 
-    # Mở Roblox bằng intent
     am start -a android.intent.action.VIEW -d "$GAME_LINK" "$ROBLOX_PACKAGE" 2>/dev/null \
         || am start -n "${ROBLOX_PACKAGE}/${ROBLOX_PACKAGE}.RobloxMainActivity" 2>/dev/null \
         || monkey -p "$ROBLOX_PACKAGE" -c android.intent.category.LAUNCHER 1 2>/dev/null \
         || true
 
-    log "INFO" "Đã gửi lệnh mở Roblox. Chờ ${WARMUP_TIME}s để game load..."
+    log "INFO" "Chờ ${WARMUP_TIME}s để Roblox load..."
     sleep "$WARMUP_TIME"
 }
 
-# Thời gian chạy
 uptime_str() {
     local secs=$(( $(date +%s) - START_TIME ))
     printf "%02dh %02dm %02ds" $((secs/3600)) $(( (secs%3600)/60 )) $((secs%60))
 }
 
-# In banner trạng thái
 print_status() {
     echo -e "\n${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "${BOLD}  🎮 ROBLOX AUTO REJOIN - ĐANG CHẠY${RESET}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "  ${CYAN}Package:${RESET}      $ROBLOX_PACKAGE"
+    echo -e "  ${CYAN}Link game:${RESET}    $GAME_LINK"
     echo -e "  ${CYAN}Lần rejoin:${RESET}   $REJOIN_COUNT"
     echo -e "  ${CYAN}Uptime:${RESET}       $(uptime_str)"
     echo -e "  ${CYAN}Crash streak:${RESET} $CRASH_STREAK"
-    echo -e "  ${CYAN}Game link:${RESET}    $GAME_LINK"
-    echo -e "  ${CYAN}Log file:${RESET}     $LOG_FILE"
+    echo -e "  ${CYAN}Log:${RESET}          $LOG_FILE"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+}
+
+# ─────────────────────────────────────────
+#  MENU CẤU HÌNH TRƯỚC KHI CHẠY
+# ─────────────────────────────────────────
+setup_menu() {
+    clear
+    echo -e "${BOLD}${MAGENTA}"
+    cat << 'EOF'
+  ____       _     _            
+ |  _ \ ___ | |__ | | _____  __
+ | |_) / _ \| '_ \| |/ _ \ \/ /
+ |  _ < (_) | |_) | | (_) >  < 
+ |_| \_\___/|_.__/|_|\___/_/\_\
+  Auto Rejoin v2.1 - Termux Root
+EOF
+    echo -e "${RESET}"
+
+    echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${BOLD}  ⚙️  CẤU HÌNH${RESET}"
+    echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+
+    # ── Package name ──
+    echo -e "${CYAN}[1] Package Roblox${RESET}"
+    echo -e "    Mặc định: ${YELLOW}com.roblox.client${RESET}"
+    echo -e "    Ví dụ khác: com.roblox.client (Android), biz.turbonium.roblox..."
+    read -rp "    Nhập package (Enter = dùng mặc định): " INPUT_PKG
+    if [ -n "$INPUT_PKG" ]; then
+        ROBLOX_PACKAGE="$INPUT_PKG"
+    fi
+    echo -e "    → ${GREEN}$ROBLOX_PACKAGE${RESET}\n"
+
+    # ── Link game / private server ──
+    echo -e "${CYAN}[2] Link Game / Private Server${RESET}"
+    echo -e "    ${YELLOW}Định dạng được hỗ trợ:${RESET}"
+    echo -e "    • roblox://placeId=10449761463"
+    echo -e "    • roblox://experiences/start?placeId=10449761463&linkCode=abc123"
+    echo -e "    • https://www.roblox.com/share?code=xxx&type=Server"
+    echo -e ""
+    echo -e "    ${YELLOW}Link của bạn:${RESET}"
+    echo -e "    https://www.roblox.com/share?code=d7ca4f4683d09b41ade6fc5e5c439b47&type=Server"
+    read -rp "    Nhập link (Enter = dùng link trên): " INPUT_LINK
+
+    if [ -z "$INPUT_LINK" ]; then
+        INPUT_LINK="https://www.roblox.com/share?code=d7ca4f4683d09b41ade6fc5e5c439b47&type=Server"
+    fi
+
+    # Chuyển link web share → deeplink roblox:// nếu có thể
+    if echo "$INPUT_LINK" | grep -q "roblox.com/share"; then
+        local share_code
+        share_code=$(echo "$INPUT_LINK" | grep -oP '(?<=code=)[^&]+' || echo "")
+        if [ -n "$share_code" ]; then
+            GAME_LINK="roblox://experiences/start?linkCode=${share_code}"
+            echo -e "    → ${GREEN}Đã chuyển sang deeplink: $GAME_LINK${RESET}\n"
+        else
+            GAME_LINK="$INPUT_LINK"
+            echo -e "    → ${GREEN}$GAME_LINK${RESET}\n"
+        fi
+    else
+        GAME_LINK="$INPUT_LINK"
+        echo -e "    → ${GREEN}$GAME_LINK${RESET}\n"
+    fi
+
+    # ── Interval ──
+    echo -e "${CYAN}[3] Tần suất kiểm tra (giây)${RESET}"
+    echo -e "    Mặc định: ${YELLOW}${CHECK_INTERVAL}s${RESET} — càng nhỏ phản ứng càng nhanh nhưng tốn pin hơn"
+    read -rp "    Nhập số giây (Enter = $CHECK_INTERVAL): " INPUT_INTERVAL
+    if [ -n "$INPUT_INTERVAL" ] && echo "$INPUT_INTERVAL" | grep -qE '^[0-9]+$'; then
+        CHECK_INTERVAL="$INPUT_INTERVAL"
+    fi
+    echo -e "    → ${GREEN}${CHECK_INTERVAL}s${RESET}\n"
+
+    # ── Warmup time ──
+    echo -e "${CYAN}[4] Thời gian chờ sau khi mở Roblox (giây)${RESET}"
+    echo -e "    Mặc định: ${YELLOW}${WARMUP_TIME}s${RESET} — cần đủ thời gian để game load xong"
+    read -rp "    Nhập số giây (Enter = $WARMUP_TIME): " INPUT_WARMUP
+    if [ -n "$INPUT_WARMUP" ] && echo "$INPUT_WARMUP" | grep -qE '^[0-9]+$'; then
+        WARMUP_TIME="$INPUT_WARMUP"
+    fi
+    echo -e "    → ${GREEN}${WARMUP_TIME}s${RESET}\n"
+
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${BOLD}  ✅ Cấu hình xong! Bắt đầu giám sát...${RESET}"
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "  ${YELLOW}Nhấn Ctrl+C để dừng bất lúc nào.${RESET}\n"
+    sleep 2
 }
 
 # ─────────────────────────────────────────
 #  KIỂM TRA MÔI TRƯỜNG
 # ─────────────────────────────────────────
 check_environment() {
-    echo -e "\n${BOLD}${CYAN}🔍 Đang kiểm tra môi trường...${RESET}\n"
     local ok=true
+    echo -e "${CYAN}🔍 Kiểm tra môi trường...${RESET}"
 
-    # Kiểm tra root
-    if [ "$(id -u)" -eq 0 ] || command -v su &>/dev/null; then
-        echo -e "  ${GREEN}✓ Root / su: OK${RESET}"
+    if [ "$(id -u)" -eq 0 ] || command -v su >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓ Root/su: OK${RESET}"
     else
-        echo -e "  ${RED}✗ Root / su: KHÔNG CÓ${RESET}"
-        echo -e "    Cần chạy script với quyền root!"
+        echo -e "  ${RED}✗ Không có quyền root!${RESET}"
         ok=false
     fi
 
-    # Kiểm tra am (Android Activity Manager)
-    if command -v am &>/dev/null; then
+    if command -v am >/dev/null 2>&1; then
         echo -e "  ${GREEN}✓ am (Android): OK${RESET}"
     else
-        echo -e "  ${RED}✗ am: KHÔNG TÌM THẤY${RESET}"
+        echo -e "  ${RED}✗ am không tìm thấy — cần chạy trong Termux${RESET}"
         ok=false
     fi
 
-    # Kiểm tra Roblox đã cài chưa
     if pm list packages 2>/dev/null | grep -q "$ROBLOX_PACKAGE"; then
-        echo -e "  ${GREEN}✓ Roblox đã cài: OK ($ROBLOX_PACKAGE)${RESET}"
+        echo -e "  ${GREEN}✓ $ROBLOX_PACKAGE: Đã cài${RESET}"
     else
-        echo -e "  ${YELLOW}⚠ Không phát hiện $ROBLOX_PACKAGE${RESET}"
-        echo -e "    Script vẫn chạy nhưng hãy kiểm tra package name!"
+        echo -e "  ${YELLOW}⚠ Không phát hiện $ROBLOX_PACKAGE (kiểm tra lại package name)${RESET}"
     fi
 
-    # Kiểm tra termux-api (tuỳ chọn)
-    if command -v termux-vibrate &>/dev/null; then
+    if command -v termux-vibrate >/dev/null 2>&1; then
         echo -e "  ${GREEN}✓ termux-api: OK${RESET}"
     else
-        echo -e "  ${YELLOW}⚠ termux-api không có (vibrate/notification bị tắt)${RESET}"
+        echo -e "  ${YELLOW}⚠ termux-api chưa cài → vibrate/notification tắt${RESET}"
         ENABLE_VIBRATE=false
         ENABLE_NOTIFICATION=false
     fi
 
     echo ""
-    if [ "$ok" = false ]; then
-        echo -e "${RED}Môi trường chưa đủ yêu cầu. Dừng lại.${RESET}"
+
+    if [ "$ok" = "false" ]; then
+        echo -e "${RED}Môi trường thiếu yêu cầu. Dừng.${RESET}"
         exit 1
     fi
 }
 
 # ─────────────────────────────────────────
-#  XỬ LÝ TÍN HIỆU (Ctrl+C)
+#  DỪNG SẠCH
 # ─────────────────────────────────────────
 cleanup() {
-    echo -e "\n\n${YELLOW}[WARN]  Script bị dừng bởi người dùng.${RESET}"
-    log "WARN" "Script dừng thủ công. Tổng rejoin: $REJOIN_COUNT | Uptime: $(uptime_str)"
-    echo -e "${CYAN}Log được lưu tại: $LOG_FILE${RESET}\n"
+    echo -e "\n\n${YELLOW}Script dừng thủ công.${RESET}"
+    log "WARN" "Dừng thủ công. Tổng rejoin: $REJOIN_COUNT | Uptime: $(uptime_str)"
+    echo -e "${CYAN}Log: $LOG_FILE${RESET}\n"
     exit 0
 }
-trap cleanup SIGINT SIGTERM
+trap cleanup INT TERM
 
 # ─────────────────────────────────────────
 #  VÒNG LẶP CHÍNH
 # ─────────────────────────────────────────
 main_loop() {
-    log "INFO" "Bắt đầu vòng lặp giám sát. PID script: $SCRIPT_PID"
-    log "INFO" "Game link: $GAME_LINK | Check interval: ${CHECK_INTERVAL}s"
+    log "INFO" "═══════════ SESSION BẮT ĐẦU ═══════════"
+    log "INFO" "Package: $ROBLOX_PACKAGE | Link: $GAME_LINK"
+    log "INFO" "Check: ${CHECK_INTERVAL}s | Delay: ${RESTART_DELAY}s | Warmup: ${WARMUP_TIME}s"
 
-    # Đảm bảo Roblox mở ngay khi bắt đầu nếu chưa chạy
     if ! is_roblox_running; then
-        log "INFO" "Roblox chưa mở. Đang khởi động lần đầu..."
+        log "INFO" "Roblox chưa mở → mở lần đầu..."
         open_roblox
     else
-        log "INFO" "Roblox đang chạy. Bắt đầu giám sát..."
+        log "INFO" "Roblox đang chạy → bắt đầu giám sát..."
     fi
 
-    local consecutive_open=0   # Đếm số lần kiểm tra thấy Roblox đang chạy
+    local consecutive_open=0
 
     while true; do
         sleep "$CHECK_INTERVAL"
@@ -273,104 +315,42 @@ main_loop() {
         if is_roblox_running; then
             consecutive_open=$((consecutive_open + 1))
             CRASH_STREAK=0
-
-            # Cứ 60 lần check (= CHECK_INTERVAL * 60 giây) mới log 1 lần
-            if (( consecutive_open % 12 == 0 )); then
+            if [ $((consecutive_open % 12)) -eq 0 ]; then
                 local mins=$(( consecutive_open * CHECK_INTERVAL / 60 ))
-                log "INFO" "Roblox đang chạy bình thường. (~${mins}p) | Rejoin: $REJOIN_COUNT | Uptime: $(uptime_str)"
+                log "INFO" "OK ~${mins}p | Rejoin: $REJOIN_COUNT | Uptime: $(uptime_str)"
             fi
         else
             consecutive_open=0
             CRASH_STREAK=$((CRASH_STREAK + 1))
             REJOIN_COUNT=$((REJOIN_COUNT + 1))
 
-            log "WARN" "⚠️  Roblox KHÔNG CÒN CHẠY! (Crash/Văng lần #$CRASH_STREAK | Rejoin #$REJOIN_COUNT)"
-            vibrate
-            show_toast "Roblox bị văng! Đang rejoin (#$REJOIN_COUNT)..."
-            send_notification "Roblox bị văng lần $REJOIN_COUNT. Đang rejoin..."
+            log "WARN" "⚠ Roblox VĂNG! Crash streak: $CRASH_STREAK | Rejoin #$REJOIN_COUNT"
+            vibrate_phone
+            show_toast "Roblox văng! Rejoin #$REJOIN_COUNT..."
+            send_notification "Roblox văng lần $REJOIN_COUNT. Đang rejoin..."
 
-            # Nếu crash liên tục quá nhiều, thêm cooldown
             if [ "$CRASH_STREAK" -ge "$MAX_CRASHES_IN_ROW" ]; then
-                log "WARN" "Crash liên tục $CRASH_STREAK lần! Chờ thêm ${CRASH_COOLDOWN}s cooldown..."
+                log "WARN" "Crash liên tục $CRASH_STREAK lần → cooldown ${CRASH_COOLDOWN}s"
                 sleep "$CRASH_COOLDOWN"
             fi
 
-            # Kill tiến trình cũ
             kill_roblox
-
-            # Mở lại game
             open_roblox
 
-            log "ACTION" "✅ Rejoin #$REJOIN_COUNT hoàn tất. Tiếp tục giám sát..."
-
-            # Xác nhận Roblox đã mở sau warmup
             if is_roblox_running; then
-                log "INFO" "Xác nhận: Roblox đang chạy sau rejoin."
+                log "ACTION" "✅ Rejoin #$REJOIN_COUNT OK"
             else
-                log "WARN" "Cảnh báo: Roblox có thể chưa mở thành công sau rejoin!"
+                log "WARN" "Roblox có thể chưa mở sau rejoin #$REJOIN_COUNT"
             fi
         fi
     done
 }
 
 # ─────────────────────────────────────────
-#  NHẬP LINK GAME
-# ─────────────────────────────────────────
-get_game_link() {
-    if [ -z "$GAME_LINK" ]; then
-        echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-        echo -e "${BOLD}  🎮 ROBLOX AUTO REJOIN TOOL v2.0${RESET}"
-        echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-        echo ""
-        echo -e "${CYAN}Nhập link Roblox game của bạn:${RESET}"
-        echo -e "${YELLOW}  Ví dụ: roblox://placeId=10449761463${RESET}"
-        echo -e "${YELLOW}  Hoặc:  https://www.roblox.com/games/10449761463${RESET}"
-        echo -e "${YELLOW}  Hoặc:  roblox://experiences/start?placeId=10449761463${RESET}"
-        echo ""
-        read -rp "  🔗 Link game: " GAME_LINK
-        echo ""
-
-        if [ -z "$GAME_LINK" ]; then
-            echo -e "${RED}Chưa nhập link! Dùng link mặc định mở Roblox.${RESET}"
-            GAME_LINK="roblox://navigateTo?navigationTarget=home"
-        fi
-    fi
-}
-
-# ─────────────────────────────────────────
 #  KHỞI ĐỘNG
 # ─────────────────────────────────────────
-clear
-echo -e "${BOLD}${MAGENTA}"
-cat << 'EOF'
-  ____       _     _            
- |  _ \ ___ | |__ | | _____  __
- | |_) / _ \| '_ \| |/ _ \ \/ /
- |  _ < (_) | |_) | | (_) >  < 
- |_| \_\___/|_.__/|_|\___/_/\_\
-  Auto Rejoin Tool v2.0 - Termux Root
-EOF
-echo -e "${RESET}"
-
-# Nhận link game
-get_game_link
-
-# Kiểm tra môi trường
+setup_menu
 check_environment
-
-# Tạo file log nếu chưa có
 touch "$LOG_FILE"
-log "INFO" "═══════════════ SESSION BẮT ĐẦU ═══════════════"
-log "INFO" "Game link: $GAME_LINK"
-log "INFO" "Package:   $ROBLOX_PACKAGE"
-log "INFO" "Check interval: ${CHECK_INTERVAL}s | Restart delay: ${RESTART_DELAY}s | Warmup: ${WARMUP_TIME}s"
-
-# In trạng thái ban đầu
 print_status
-
-echo -e "${BOLD}${GREEN}🚀 Đang bắt đầu giám sát Roblox...${RESET}"
-echo -e "${YELLOW}   Nhấn Ctrl+C để dừng script.${RESET}\n"
-sleep 2
-
-# Bắt đầu vòng lặp chính
 main_loop
